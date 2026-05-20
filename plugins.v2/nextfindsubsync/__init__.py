@@ -29,7 +29,7 @@ class NextFindSubSync(_PluginBase):
     plugin_name = "NextFind订阅同步"
     plugin_desc = "拦截 MoviePilot 自带订阅处理，并定时将订阅同步到 NextFind。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "frh-hh"
     author_url = "https://github.com/frh-hh"
     plugin_config_prefix = "nextfindsubsync_"
@@ -80,7 +80,6 @@ class NextFindSubSync(_PluginBase):
                 if self._scheduler.get_jobs():
                     self._scheduler.start()
                 self._onlyonce = False
-                self._force_resync = False
                 self.__update_config()
 
     def stop_service(self):
