@@ -1,8 +1,8 @@
 """
-Emby 异步图片刮削插件。
+Emby 异步刮削插件。
 
 接收 MoviePilot 内置 Emby Webhook 解析后的 library.new 事件，延迟合并任务，
-只使用 MoviePilot 刮削链补齐缺失图片，不创建或修改 NFO，完成后刷新 Emby 对应项目。
+使用 MoviePilot 原生刮削链补齐所有缺失元数据，完成后刷新 Emby 对应项目。
 """
 import datetime
 import time
@@ -13,59 +13,28 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from app import schemas
-from app.chain.media import MediaChain, ScrapingConfig
+from app.chain.media import MediaChain
 from app.chain.storage import StorageChain
 from app.core.config import settings
 from app.core.event import Event, eventmanager
-from app.core.metainfo import MetaInfo, MetaInfoPath
 from app.helper.mediaserver import MediaServerHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import (
     EventType,
     NotificationType,
-    ScrapingMetadata,
-    ScrapingPolicy,
-    ScrapingTarget,
 )
 from app.utils.http import RequestUtils
 from app.utils.url import UrlUtils
 
 
-class _ImageOnlyMediaChain(MediaChain):
-    """独立于主程序单例的图片专用刮削链。"""
-
-    @staticmethod
-    def _image_only_config() -> ScrapingConfig:
-        config = {
-            f"{target.name.lower()}_nfo": ScrapingPolicy.SKIP.value
-            for target in ScrapingTarget
-        }
-        for target in ScrapingTarget:
-            for metadata in ScrapingMetadata:
-                if metadata != ScrapingMetadata.NFO:
-                    config[f"{target.name.lower()}_{metadata.name.lower()}"] = (
-                        ScrapingPolicy.MISSINGONLY.value
-                    )
-        return ScrapingConfig(config)
-
-    def __init__(self):
-        super().__init__()
-        self.scraping_policies = self._image_only_config()
-
-    def on_config_changed(self):
-        """不跟随 MP 全局刮削策略，始终保持仅补缺失图片。"""
-        self.scraping_policies = self._image_only_config()
-
-
 class EmbyAsyncImages(_PluginBase):
-    """Emby 异步图片刮削。"""
+    """Emby 异步刮削。"""
 
-    plugin_name = "Emby异步图片刮削"
-    plugin_desc = "Emby 快速入库后，由 MoviePilot 异步补齐缺失图片；不创建或修改 NFO。"
+    plugin_name = "Emby异步刮削"
+    plugin_desc = "Emby 快速入库后，由 MoviePilot 异步补齐所有缺失元数据。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/emby.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "frh-hh"
     author_url = "https://github.com/frh-hh"
     plugin_config_prefix = "embyasyncimages_"
@@ -80,9 +49,10 @@ class EmbyAsyncImages(_PluginBase):
     _max_retries: int = 5
     _storage: str = "local"
     _path_mappings: str = ""
-    _scrape_episode_images: bool = False
     _refresh_emby: bool = True
     _onlyonce: bool = False
+    _manual_path: str = ""
+    _manual_scrape: bool = False
     _scheduler: Optional[BackgroundScheduler] = None
     _pending: Dict[str, dict] = {}
     _lock = RLock()
@@ -106,14 +76,15 @@ class EmbyAsyncImages(_PluginBase):
             self._max_retries = self._to_int(config.get("max_retries"), 5, 0, 20)
             self._storage = (config.get("storage", "local") or "local").strip()
             self._path_mappings = config.get("path_mappings", "") or ""
-            self._scrape_episode_images = bool(config.get("scrape_episode_images", False))
             self._refresh_emby = bool(config.get("refresh_emby", True))
             self._onlyonce = bool(config.get("onlyonce", False))
+            self._manual_path = config.get("manual_path", "") or ""
+            self._manual_scrape = bool(config.get("manual_scrape", False))
 
         saved_pending = self.get_data("pending") or {}
         self._pending = saved_pending if isinstance(saved_pending, dict) else {}
 
-        if self._enabled or self._onlyonce:
+        if self._enabled or self._onlyonce or self._manual_scrape:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             self._scheduler.add_job(
                 func=self._drain_queue,
@@ -135,6 +106,17 @@ class EmbyAsyncImages(_PluginBase):
                 )
                 self._onlyonce = False
                 self.__update_config()
+            if self._manual_scrape:
+                self._scheduler.add_job(
+                    func=self._run_manual_directory,
+                    trigger="date",
+                    run_date=datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                    + datetime.timedelta(seconds=3),
+                    id="EmbyAsyncImagesManualScrape",
+                    replace_existing=True,
+                )
+                self._manual_scrape = False
+                self.__update_config()
             self._scheduler.start()
 
     def stop_service(self):
@@ -144,7 +126,7 @@ class EmbyAsyncImages(_PluginBase):
                 if self._scheduler.running:
                     self._scheduler.shutdown(wait=False)
         except Exception as err:
-            logger.debug(f"Emby 异步图片刮削停止调度器时忽略异常：{err}")
+            logger.debug(f"Emby 异步刮削停止调度器时忽略异常：{err}")
         finally:
             self._scheduler = None
 
@@ -157,7 +139,7 @@ class EmbyAsyncImages(_PluginBase):
             {
                 "cmd": "/emby_image_scrape",
                 "event": EventType.PluginAction,
-                "desc": "立即处理 Emby 图片刮削队列",
+                "desc": "立即处理 Emby 异步刮削队列",
                 "category": "媒体库",
                 "data": {"action": "emby_async_images_run"},
             },
@@ -180,7 +162,7 @@ class EmbyAsyncImages(_PluginBase):
                 "endpoint": self.api_run_pending,
                 "methods": ["POST"],
                 "auth": "apikey",
-                "summary": "立即处理 Emby 图片刮削队列",
+                "summary": "立即处理 Emby 异步刮削队列",
             },
             {
                 "path": "/scrape_directory",
@@ -206,9 +188,10 @@ class EmbyAsyncImages(_PluginBase):
                                 "type": "info",
                                 "variant": "tonal",
                                 "text": (
-                                    "监听 Emby library.new Webhook，只补齐缺失图片。电影默认立即处理；"
+                                    "监听 Emby library.new Webhook，通过 MoviePilot 原生刮削补齐缺失的 NFO 和图片。"
+                                    "电影默认立即处理；"
                                     "电视剧配合 Emby 的剧集分组通知，默认等待 10 秒确保路径就绪。"
-                                    "插件不创建、不覆盖 NFO，也不会覆盖已有图片。"
+                                    "刮削内容及覆盖行为遵循 MoviePilot 全局刮削策略。"
                                 ),
                             },
                         }],
@@ -327,7 +310,7 @@ class EmbyAsyncImages(_PluginBase):
                         },
                         {
                             "component": "VCol",
-                            "props": {"cols": 12, "md": 6},
+                            "props": {"cols": 12, "md": 9},
                             "content": [{
                                 "component": "VTextarea",
                                 "props": {
@@ -340,16 +323,33 @@ class EmbyAsyncImages(_PluginBase):
                                 },
                             }],
                         },
+                    ],
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 9},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "manual_path",
+                                    "label": "手动刮削目录",
+                                    "placeholder": "/media/电影/影片目录",
+                                    "hint": "保存配置后由 MP 原生刮削递归补齐缺失元数据",
+                                    "persistent-hint": True,
+                                },
+                            }],
+                        },
                         {
                             "component": "VCol",
                             "props": {"cols": 12, "md": 3},
                             "content": [{
                                 "component": "VSwitch",
                                 "props": {
-                                    "model": "scrape_episode_images",
-                                    "label": "补齐单集缩略图",
-                                    "hint": "大量剧集会产生更多请求，默认关闭",
-                                    "persistent-hint": True,
+                                    "model": "manual_scrape",
+                                    "label": "立即刮削该目录",
                                 },
                             }],
                         },
@@ -365,9 +365,10 @@ class EmbyAsyncImages(_PluginBase):
             "max_retries": 5,
             "storage": "local",
             "path_mappings": "",
-            "scrape_episode_images": False,
             "refresh_emby": True,
             "onlyonce": False,
+            "manual_path": "",
+            "manual_scrape": False,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -422,6 +423,16 @@ class EmbyAsyncImages(_PluginBase):
         """调用 MoviePilot 原生刮削功能处理指定目录。"""
         return self._scrape_directory(path=path, storage=storage)
 
+    def _run_manual_directory(self):
+        """执行配置页面提交的一次性目录刮削任务。"""
+        result = self._scrape_directory(path=self._manual_path)
+        if not result.get("success") and self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="【Emby异步刮削】手动目录刮削失败",
+                text=result.get("message"),
+            )
+
     @eventmanager.register(EventType.PluginAction)
     def remote_run(self, event: Event):
         if not event:
@@ -433,10 +444,10 @@ class EmbyAsyncImages(_PluginBase):
         if action == "emby_async_images_scrape_dir":
             path = str(event_data.get("arg_str") or event_data.get("path") or "").strip()
             result = self._scrape_directory(path=path)
-            title = "【Emby异步图片刮削】目录刮削"
+            title = "【Emby异步刮削】目录刮削"
         else:
             result = self._force_drain_queue()
-            title = "【Emby异步图片刮削】队列处理"
+            title = "【Emby异步刮削】队列处理"
         self.post_message(
             mtype=NotificationType.Plugin,
             channel=event_data.get("channel"),
@@ -471,11 +482,11 @@ class EmbyAsyncImages(_PluginBase):
                 True,
                 message,
             )
-            logger.info(f"Emby 异步图片刮削：手动目录刮削，{message}")
+            logger.info(f"Emby 异步刮削：手动目录刮削，{message}")
             return {"success": True, "message": message}
         except Exception as err:
             message = f"目录刮削失败：{err}"
-            logger.error(f"Emby 异步图片刮削：{message}")
+            logger.error(f"Emby 异步刮削：{message}")
             return {"success": False, "message": message}
 
     @eventmanager.register(EventType.WebhookMessage)
@@ -496,7 +507,7 @@ class EmbyAsyncImages(_PluginBase):
         item_path = str(self._event_value(info, "item_path") or "").strip()
         server_name = str(self._event_value(info, "server_name") or "").strip()
         if not item_id and not item_path:
-            logger.warning("Emby 异步图片刮削：Webhook 缺少 item_id 和 item_path，已忽略")
+            logger.warning("Emby 异步刮削：Webhook 缺少 item_id 和 item_path，已忽略")
             return
 
         key = f"{server_name}:{item_type}:{item_id or item_path}"
@@ -529,7 +540,7 @@ class EmbyAsyncImages(_PluginBase):
             self._save_pending()
         self._schedule_queue_wakeup(key=key, due_at=task["due_at"])
         logger.info(
-            f"Emby 异步图片刮削：任务已入队，{task['item_name']}，"
+            f"Emby 异步刮削：任务已入队，{task['item_name']}，"
             f"等待 {delay_seconds} 秒后处理"
         )
 
@@ -581,13 +592,17 @@ class EmbyAsyncImages(_PluginBase):
                     f"MP 无法访问路径：[{self._storage}]{mapped_path}，请检查挂载和路径映射"
                 )
 
-            image_count = self._scrape_images(fileitem=fileitem, item_type=task.get("item_type"))
+            MediaChain().scrape_metadata(
+                fileitem=fileitem,
+                overwrite=False,
+                recursive=True,
+            )
             if self._refresh_emby and task.get("item_id"):
                 self._refresh_emby_item(task)
 
-            message = f"只补缺失图片完成（处理 {image_count} 个图片层级），NFO 未改动"
+            message = "MP 原生刮削完成，缺失的 NFO 和图片已按全局刮削策略处理"
             self._append_history(task, True, message)
-            logger.info(f"Emby 异步图片刮削：{task.get('item_name')} {message}")
+            logger.info(f"Emby 异步刮削：{task.get('item_name')} {message}")
             with self._lock:
                 self._pending.pop(key, None)
                 self._save_pending()
@@ -596,7 +611,7 @@ class EmbyAsyncImages(_PluginBase):
             task["attempts"] = attempts
             if attempts > self._max_retries:
                 message = f"超过最大重试次数：{err}"
-                logger.error(f"Emby 异步图片刮削：{task.get('item_name')} {message}")
+                logger.error(f"Emby 异步刮削：{task.get('item_name')} {message}")
                 self._append_history(task, False, message)
                 with self._lock:
                     self._pending.pop(key, None)
@@ -604,7 +619,7 @@ class EmbyAsyncImages(_PluginBase):
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.Plugin,
-                        title="【Emby异步图片刮削】任务失败",
+                        title="【Emby异步刮削】任务失败",
                         text=f"{task.get('item_name')}：{message}",
                     )
             else:
@@ -615,129 +630,9 @@ class EmbyAsyncImages(_PluginBase):
                     self._save_pending()
                 self._schedule_queue_wakeup(key=key, due_at=task["due_at"])
                 logger.warning(
-                    f"Emby 异步图片刮削：{task.get('item_name')} 处理失败：{err}；"
+                    f"Emby 异步刮削：{task.get('item_name')} 处理失败：{err}；"
                     f"{retry_delay} 秒后第 {attempts}/{self._max_retries} 次重试"
                 )
-
-    def _scrape_images(self, fileitem: schemas.FileItem, item_type: str) -> int:
-        """只调用 MP 图片刮削函数，不经过任何 NFO 代码路径。"""
-        media_chain = MediaChain()
-        context = media_chain.recognize_by_path(fileitem.path, obtain_images=True)
-        if not context or not context.media_info:
-            raise RuntimeError(f"MP 无法识别媒体：{fileitem.path}")
-
-        image_chain = _ImageOnlyMediaChain()
-        # 防止运行期间 MP 配置重载影响专用策略。
-        image_chain.scraping_policies = image_chain._image_only_config()
-        mediainfo = context.media_info
-        processed = 0
-
-        if item_type == "MOV":
-            parent = StorageChain().get_parent_item(fileitem) if fileitem.type == "file" else None
-            image_chain._scrape_images_generic(
-                current_fileitem=fileitem,
-                mediainfo=mediainfo,
-                item_type=ScrapingTarget.MOVIE,
-                parent_fileitem=parent,
-                overwrite=False,
-            )
-            return 1
-
-        if fileitem.type != "dir":
-            parent = StorageChain().get_parent_item(fileitem)
-            if not parent:
-                raise RuntimeError(f"无法确定电视剧根目录：{fileitem.path}")
-            fileitem = parent
-
-        image_chain._scrape_images_generic(
-            current_fileitem=fileitem,
-            mediainfo=mediainfo,
-            item_type=ScrapingTarget.TV,
-            overwrite=False,
-        )
-        processed += 1
-
-        children = StorageChain().list_files(fileitem=fileitem, recursion=False) or []
-        for child in children:
-            if child.type == "dir":
-                season = self._season_number(child.name)
-                if season is None:
-                    continue
-                image_chain._scrape_images_generic(
-                    current_fileitem=child,
-                    mediainfo=mediainfo,
-                    item_type=ScrapingTarget.SEASON,
-                    parent_fileitem=fileitem,
-                    overwrite=False,
-                    season_number=season,
-                )
-                processed += 1
-                if self._scrape_episode_images:
-                    processed += self._scrape_episode_images_in_directory(
-                        image_chain=image_chain,
-                        media_chain=media_chain,
-                        directory=child,
-                        mediainfo=mediainfo,
-                    )
-            elif self._scrape_episode_images:
-                processed += self._scrape_episode_image(
-                    image_chain=image_chain,
-                    media_chain=media_chain,
-                    fileitem=child,
-                    parent=fileitem,
-                    mediainfo=mediainfo,
-                )
-        return processed
-
-    def _scrape_episode_images_in_directory(
-            self,
-            image_chain: _ImageOnlyMediaChain,
-            media_chain: MediaChain,
-            directory: schemas.FileItem,
-            mediainfo: Any,
-    ) -> int:
-        count = 0
-        files = StorageChain().list_files(fileitem=directory, recursion=False) or []
-        for fileitem in files:
-            if fileitem.type != "file":
-                continue
-            count += self._scrape_episode_image(
-                image_chain=image_chain,
-                media_chain=media_chain,
-                fileitem=fileitem,
-                parent=directory,
-                mediainfo=mediainfo,
-            )
-        return count
-
-    @staticmethod
-    def _scrape_episode_image(
-            image_chain: _ImageOnlyMediaChain,
-            media_chain: MediaChain,
-            fileitem: schemas.FileItem,
-            parent: schemas.FileItem,
-            mediainfo: Any,
-    ) -> int:
-        meta = MetaInfoPath(Path(fileitem.path))
-        if not meta.begin_episode:
-            return 0
-        episode_info = media_chain.recognize_media(
-            meta=meta,
-            tmdbid=mediainfo.tmdb_id,
-            episode_group=mediainfo.episode_group,
-        )
-        if not episode_info:
-            return 0
-        image_chain._scrape_images_generic(
-            current_fileitem=fileitem,
-            mediainfo=episode_info,
-            item_type=ScrapingTarget.EPISODE,
-            parent_fileitem=parent,
-            overwrite=False,
-            season_number=meta.begin_season,
-            episode_number=meta.begin_episode,
-        )
-        return 1
 
     def _resolve_task_path(self, task: dict) -> str:
         """电视剧优先从 MP 已配置的 Emby 实例查询 Series 根目录。"""
@@ -785,13 +680,6 @@ class EmbyAsyncImages(_PluginBase):
     @staticmethod
     def _normalize_path(path: str) -> str:
         return (path or "").replace("\\", "/").rstrip("/") or "/"
-
-    @staticmethod
-    def _season_number(name: str) -> Optional[int]:
-        if name in settings.RENAME_FORMAT_S0_NAMES:
-            return 0
-        meta = MetaInfo(name or "")
-        return meta.begin_season
 
     @staticmethod
     def _event_value(info: Any, key: str) -> Any:
@@ -861,7 +749,7 @@ class EmbyAsyncImages(_PluginBase):
                 replace_existing=True,
             )
         except Exception as err:
-            logger.warning(f"Emby 异步图片刮削：创建任务唤醒失败，将由周期检查兜底：{err}")
+            logger.warning(f"Emby 异步刮削：创建任务唤醒失败，将由周期检查兜底：{err}")
 
     def __update_config(self):
         self.update_config({
@@ -873,9 +761,10 @@ class EmbyAsyncImages(_PluginBase):
             "max_retries": self._max_retries,
             "storage": self._storage,
             "path_mappings": self._path_mappings,
-            "scrape_episode_images": self._scrape_episode_images,
             "refresh_emby": self._refresh_emby,
             "onlyonce": False,
+            "manual_path": self._manual_path,
+            "manual_scrape": False,
         })
 
     @staticmethod
