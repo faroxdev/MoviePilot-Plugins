@@ -65,7 +65,7 @@ class EmbyAsyncImages(_PluginBase):
     plugin_name = "Emby异步图片刮削"
     plugin_desc = "Emby 快速入库后，由 MoviePilot 异步补齐缺失图片；不创建或修改 NFO。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/emby.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     plugin_author = "frh-hh"
     author_url = "https://github.com/frh-hh"
     plugin_config_prefix = "embyasyncimages_"
@@ -153,25 +153,43 @@ class EmbyAsyncImages(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return [{
-            "cmd": "/emby_image_scrape",
-            "event": EventType.PluginAction,
-            "desc": "立即处理 Emby 图片刮削队列",
-            "category": "媒体库",
-            "data": {"action": "emby_async_images_run"},
-        }]
+        return [
+            {
+                "cmd": "/emby_image_scrape",
+                "event": EventType.PluginAction,
+                "desc": "立即处理 Emby 图片刮削队列",
+                "category": "媒体库",
+                "data": {"action": "emby_async_images_run"},
+            },
+            {
+                "cmd": "/emby_image_scrape_dir",
+                "event": EventType.PluginAction,
+                "desc": "使用 MP 刮削指定目录的缺失元数据（命令后输入目录）",
+                "category": "媒体库",
+                "data": {"action": "emby_async_images_scrape_dir"},
+            },
+        ]
 
     def get_service(self) -> List[Dict[str, Any]]:
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return [{
-            "path": "/run_pending",
-            "endpoint": self.api_run_pending,
-            "methods": ["POST"],
-            "auth": "apikey",
-            "summary": "立即处理 Emby 图片刮削队列",
-        }]
+        return [
+            {
+                "path": "/run_pending",
+                "endpoint": self.api_run_pending,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "立即处理 Emby 图片刮削队列",
+            },
+            {
+                "path": "/scrape_directory",
+                "endpoint": self.api_scrape_directory,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "使用 MoviePilot 手动刮削指定目录",
+            },
+        ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [{
@@ -400,21 +418,65 @@ class EmbyAsyncImages(_PluginBase):
     def api_run_pending(self) -> dict:
         return self._force_drain_queue()
 
+    def api_scrape_directory(self, path: str, storage: Optional[str] = None) -> dict:
+        """调用 MoviePilot 原生刮削功能处理指定目录。"""
+        return self._scrape_directory(path=path, storage=storage)
+
     @eventmanager.register(EventType.PluginAction)
     def remote_run(self, event: Event):
         if not event:
             return
         event_data = event.event_data or {}
-        if event_data.get("action") != "emby_async_images_run":
+        action = event_data.get("action")
+        if action not in {"emby_async_images_run", "emby_async_images_scrape_dir"}:
             return
-        result = self._force_drain_queue()
+        if action == "emby_async_images_scrape_dir":
+            path = str(event_data.get("arg_str") or event_data.get("path") or "").strip()
+            result = self._scrape_directory(path=path)
+            title = "【Emby异步图片刮削】目录刮削"
+        else:
+            result = self._force_drain_queue()
+            title = "【Emby异步图片刮削】队列处理"
         self.post_message(
             mtype=NotificationType.Plugin,
             channel=event_data.get("channel"),
-            title="【Emby异步图片刮削】队列处理",
+            title=title,
             text=result.get("message"),
             userid=event_data.get("user"),
         )
+
+    def _scrape_directory(self, path: str, storage: Optional[str] = None) -> dict:
+        path = (path or "").strip().strip('"').strip("'")
+        if not path:
+            return {"success": False, "message": "请在命令后输入需要刮削的目录"}
+        try:
+            mapped_path = self._map_path(path)
+            fileitem = StorageChain().get_file_item(
+                storage=(storage or self._storage).strip(),
+                path=Path(mapped_path),
+            )
+            if not fileitem:
+                raise RuntimeError(f"MP 无法访问目录：[{storage or self._storage}]{mapped_path}")
+            if fileitem.type != "dir":
+                raise RuntimeError(f"目标不是目录：{mapped_path}")
+
+            MediaChain().scrape_metadata(
+                fileitem=fileitem,
+                overwrite=False,
+                recursive=True,
+            )
+            message = f"{mapped_path} 已完成 MP 原生刮削，缺失的 NFO 和图片按全局刮削策略处理"
+            self._append_history(
+                {"item_name": Path(mapped_path).name, "item_path": mapped_path},
+                True,
+                message,
+            )
+            logger.info(f"Emby 异步图片刮削：手动目录刮削，{message}")
+            return {"success": True, "message": message}
+        except Exception as err:
+            message = f"目录刮削失败：{err}"
+            logger.error(f"Emby 异步图片刮削：{message}")
+            return {"success": False, "message": message}
 
     @eventmanager.register(EventType.WebhookMessage)
     def on_webhook(self, event: Event):
