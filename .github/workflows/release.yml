@@ -18,6 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -88,7 +94,45 @@ jobs:
 
               echo "Packing $plugin_id from $plugin_dir -> $asset"
               rm -f "$asset"
-              (cd "$(dirname "$plugin_dir")" && zip -r "$GITHUB_WORKSPACE/$asset" "$(basename "$plugin_dir")" -x "*/__pycache__/*" -x "*.pyc") >/dev/null
+              package_parent="$(dirname "$plugin_dir")"
+              package_name="$(basename "$plugin_dir")"
+              staging_dir=""
+
+              if [ "$plugin_id" = "Downloader115FastUpload" ]; then
+                # 固定上游提交，保证构建可复现；插件运行时会按容器架构自动选择。
+                fake115_commit="e65268c005dc997ab4365c47cb6968dca2ea0f44"
+                staging_dir="$(mktemp -d)"
+                source_dir="$(mktemp -d)"
+                cp -a "$plugin_dir" "$staging_dir/$package_name"
+                mkdir -p "$staging_dir/$package_name/bin" "$staging_dir/$package_name/third_party"
+                git clone --quiet https://github.com/orzogc/fake115uploader.git "$source_dir"
+                git -C "$source_dir" checkout --quiet "$fake115_commit"
+                for arch in amd64 arm64; do
+                  echo "Building fake115uploader linux/$arch at $fake115_commit"
+                  (
+                    cd "$source_dir"
+                    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+                      go build -trimpath -ldflags="-s -w" \
+                      -o "$staging_dir/$package_name/bin/fake115uploader-linux-$arch" .
+                  )
+                done
+                cp "$source_dir/LICENSE" \
+                  "$staging_dir/$package_name/third_party/fake115uploader.LICENSE"
+                git -C "$source_dir" archive --format=tar.gz \
+                  --output="$staging_dir/$package_name/third_party/fake115uploader-source.tar.gz" \
+                  "$fake115_commit"
+                package_parent="$staging_dir"
+              fi
+
+              (
+                cd "$package_parent"
+                zip -r "$GITHUB_WORKSPACE/$asset" "$package_name" \
+                  -x "*/__pycache__/*" -x "*.pyc"
+              ) >/dev/null
+
+              if [ -n "$staging_dir" ]; then
+                rm -rf "$staging_dir" "$source_dir"
+              fi
 
               # If same tag exists, delete release and both remote/local tag first
               if gh release view "$tag" >/dev/null 2>&1; then
@@ -109,4 +153,3 @@ jobs:
 
           process_package "package.json"
           process_package "package.v2.json"
-

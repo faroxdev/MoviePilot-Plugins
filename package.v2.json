@@ -26,5 +26,19 @@
       "v1.0.1": "电影默认立即处理；电视剧配合 Emby 按剧集分组通知，默认仅等待 10 秒确保路径就绪。",
       "v1.0.0": "首个版本：监听 Emby library.new，延迟合并任务，只补缺失图片，保留 NFO 和已有图片，完成后刷新 Emby 项目。"
     }
+  },
+  "Downloader115FastUpload": {
+    "name": "下载器115秒传",
+    "release": true,
+    "description": "监控 MoviePilot 下载器任务，使用 fake115uploader 尝试 115 秒传；成功后删除种子和文件，失败则保留。",
+    "labels": "下载器,qBittorrent,Transmission,115,秒传",
+    "version": "1.1.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
+    "author": "frh-hh",
+    "level": 1,
+    "history": {
+      "v1.1.0": "Release 内置 Linux amd64/arm64 fake115uploader，插件自动选择架构并设置执行权限，也可用外部路径覆盖。",
+      "v1.0.0": "首个版本：通过 MP 统一接口监控下载器新完成任务，仅尝试 115 秒传，成功后删除种子和数据，失败保留并集成 MP 日志、通知与历史记录。"
+    }
   }
 }
