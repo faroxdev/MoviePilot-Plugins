@@ -35,7 +35,7 @@ class Downloader115FastUpload(_PluginBase):
     plugin_name = "下载器115秒传"
     plugin_desc = "监控下载器任务；115 秒传成功后删除种子和文件，失败则保留。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "frh-hh"
     author_url = "https://github.com/frh-hh"
     plugin_config_prefix = "downloader115fastupload_"
@@ -51,6 +51,7 @@ class Downloader115FastUpload(_PluginBase):
     _cookie: str = ""
     _cid: str = "0"
     _scan_interval: int = 30
+    _retry_interval: int = 3600
     _settle_seconds: int = 10
     _timeout_minutes: int = 120
     _http_retry: int = 1
@@ -80,6 +81,9 @@ class Downloader115FastUpload(_PluginBase):
             self._scan_interval = self._to_int(
                 config.get("scan_interval"), 30, 5, 3600
             )
+            self._retry_interval = self._to_int(
+                config.get("retry_interval"), 3600, 60, 604800
+            )
             self._settle_seconds = self._to_int(
                 config.get("settle_seconds"), 10, 0, 3600
             )
@@ -99,6 +103,11 @@ class Downloader115FastUpload(_PluginBase):
         saved_history = self.get_data("history") or []
         self._tasks = saved_tasks if isinstance(saved_tasks, dict) else {}
         self._history = saved_history if isinstance(saved_history, list) else []
+        # 兼容 1.1.0 保存的失败任务，为其补上独立重试时间。
+        migration_now = time.time()
+        for task in self._tasks.values():
+            if task.get("status") == "upload_failed" and not task.get("retry_at"):
+                task["retry_at"] = migration_now + self._retry_interval
 
         if self._enabled or self._onlyonce or self._process_existing or self._retry_failed:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -111,6 +120,9 @@ class Downloader115FastUpload(_PluginBase):
                 coalesce=True,
                 replace_existing=True,
             )
+            for key, task in self._tasks.items():
+                if task.get("status") == "upload_failed" and task.get("retry_at"):
+                    self._schedule_retry(key, float(task["retry_at"]))
             self._scheduler.add_job(
                 func=self.scan,
                 trigger="date",
@@ -266,8 +278,9 @@ class Downloader115FastUpload(_PluginBase):
                 {
                     "component": "VRow",
                     "content": [
-                        self._col_text("scan_interval", "检查间隔（秒）", "30", 3, "number"),
-                        self._col_text("settle_seconds", "完成后等待（秒）", "10", 3, "number"),
+                    self._col_text("scan_interval", "检查间隔（秒）", "30", 3, "number"),
+                    self._col_text("retry_interval", "失败重试间隔（秒）", "3600", 3, "number"),
+                    self._col_text("settle_seconds", "完成后等待（秒）", "10", 3, "number"),
                         self._col_text("timeout_minutes", "单任务超时（分钟）", "120", 3, "number"),
                     ],
                 },
@@ -295,6 +308,7 @@ class Downloader115FastUpload(_PluginBase):
             "cookie": "",
             "cid": "0",
             "scan_interval": 30,
+            "retry_interval": 3600,
             "settle_seconds": 10,
             "timeout_minutes": 120,
             "http_retry": 1,
@@ -454,6 +468,17 @@ class Downloader115FastUpload(_PluginBase):
                     task["status"] = "ready"
                     task["completed_at"] = now - self._settle_seconds
                     status = "ready"
+                elif status == "upload_failed":
+                    retry_at = float(task.get("retry_at", 0) or 0)
+                    if retry_at <= now:
+                        task["status"] = "ready"
+                        task["completed_at"] = now - self._settle_seconds
+                        task["updated_at"] = now
+                        self._tasks[key] = task
+                        status = "ready"
+                        logger.info(
+                            f"下载器115秒传：失败任务到达重试时间：{torrent.get('name')}"
+                        )
                 elif status == "delete_failed":
                     self._delete_after_upload(chain, torrent, key)
                     processed += 1
@@ -560,6 +585,7 @@ class Downloader115FastUpload(_PluginBase):
             "status": "deleted",
             "updated_at": time.time(),
         }
+        self._cancel_retry(key)
         message = "秒传成功，已删除 下载任务和对应文件"
         self._append_history(torrent, "成功", message)
         logger.info(f"下载器115秒传：{title} {message}")
@@ -776,13 +802,52 @@ class Downloader115FastUpload(_PluginBase):
             "status": "upload_failed",
             "title": torrent.get("name") or torrent.get("hash"),
             "message": message,
+            "retry_at": time.time() + self._retry_interval,
+            "retry_count": int(self._tasks.get(key, {}).get("retry_count", 0)) + 1,
             "updated_at": time.time(),
         }
         self._append_history(torrent, status, message)
         logger.error(
             f"下载器115秒传：{torrent.get('name')} {status}，保留下载任务和文件：{message}"
         )
+        self._schedule_retry(key, self._tasks[key]["retry_at"])
         self._notify_result(str(torrent.get("name") or ""), False, message)
+
+    def _schedule_retry(self, key: str, retry_at: float):
+        if not self._scheduler:
+            return
+        run_date = datetime.datetime.fromtimestamp(
+            retry_at, tz=pytz.timezone(settings.TZ)
+        )
+        self._scheduler.add_job(
+            func=self._retry_task,
+            trigger="date",
+            run_date=run_date,
+            args=[key],
+            id=self._retry_job_id(key),
+            replace_existing=True,
+        )
+
+    def _retry_task(self, key: str):
+        task = self._tasks.get(key)
+        if not task or task.get("status") != "upload_failed":
+            return
+        if float(task.get("retry_at", 0) or 0) > time.time():
+            self._schedule_retry(key, float(task["retry_at"]))
+            return
+        self.scan()
+
+    def _cancel_retry(self, key: str):
+        if not self._scheduler:
+            return
+        try:
+            self._scheduler.remove_job(self._retry_job_id(key))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _retry_job_id(key: str) -> str:
+        return "Downloader115FastUploadRetry-" + re.sub(r"[^A-Za-z0-9_-]", "_", key)
 
     def _append_history(self, torrent: dict, status: str, message: str):
         self._history.append({
@@ -819,6 +884,7 @@ class Downloader115FastUpload(_PluginBase):
             "cookie": self._cookie,
             "cid": self._cid,
             "scan_interval": self._scan_interval,
+            "retry_interval": self._retry_interval,
             "settle_seconds": self._settle_seconds,
             "timeout_minutes": self._timeout_minutes,
             "http_retry": self._http_retry,
