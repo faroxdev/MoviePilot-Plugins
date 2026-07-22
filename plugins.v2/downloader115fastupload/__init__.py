@@ -5,12 +5,14 @@
 对应种子和数据；秒传失败时保留原任务和文件。
 """
 import datetime
+import json
 import platform
 import queue
 import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -35,7 +37,7 @@ class Downloader115FastUpload(_PluginBase):
     plugin_name = "下载器115秒传"
     plugin_desc = "监控下载器任务；115 秒传成功后删除种子和文件，失败则保留。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "frh-hh"
     author_url = "https://github.com/frh-hh"
     plugin_config_prefix = "downloader115fastupload_"
@@ -525,16 +527,53 @@ class Downloader115FastUpload(_PluginBase):
             )
             return
 
-        try:
-            command = self._build_command(path)
-        except Exception as err:
-            self._record_failure(key, torrent, "程序不可用", str(err))
-            return
-        ok, output = self._run_uploader(command, title)
-        if not ok:
-            summary = self._last_output(output) or "fake115uploader 返回失败"
-            self._record_failure(key, torrent, "秒传失败", summary)
-            return
+        failed_files = self._tasks.get(key, {}).get("failed_files") or []
+        if failed_files:
+            remaining = []
+            outputs = []
+            for index, item in enumerate(failed_files):
+                if not isinstance(item, dict) or not item.get("path"):
+                    remaining.append(item)
+                    outputs.append("失败记录缺少文件路径")
+                    continue
+                retry_path = Path(str(item["path"]))
+                if not retry_path.exists():
+                    remaining.append(item)
+                    outputs.append(f"文件不存在：{retry_path}")
+                    continue
+                try:
+                    ok, output, result = self._run_upload_attempt(
+                        retry_path, title, cid=item.get("cid")
+                    )
+                except Exception as err:
+                    remaining.extend(failed_files[index:])
+                    outputs.append(str(err))
+                    break
+                if not ok:
+                    remaining.extend(self._result_failed_files(result) or [item])
+                    outputs.append(self._last_output(output))
+            if remaining:
+                summary = " | ".join(filter(None, outputs)) or "部分文件仍无法秒传"
+                self._record_failure(
+                    key, torrent, "秒传失败", summary, failed_files=remaining
+                )
+                return
+        else:
+            try:
+                ok, output, result = self._run_upload_attempt(path, title)
+            except Exception as err:
+                self._record_failure(key, torrent, "程序不可用", str(err))
+                return
+            if not ok:
+                summary = self._last_output(output) or "fake115uploader 返回失败"
+                self._record_failure(
+                    key,
+                    torrent,
+                    "秒传失败",
+                    summary,
+                    failed_files=self._result_failed_files(result),
+                )
+                return
 
         self._tasks[key] = {
             "status": "uploaded",
@@ -625,7 +664,6 @@ class Downloader115FastUpload(_PluginBase):
         reader.start()
         deadline = time.monotonic() + self._timeout_minutes * 60
         reader_done = False
-        rapid_failure_seen = False
         try:
             while process.poll() is None or not reader_done:
                 if time.monotonic() > deadline and process.poll() is None:
@@ -643,29 +681,23 @@ class Downloader115FastUpload(_PluginBase):
                 if len(output_lines) > 500:
                     output_lines = output_lines[-500:]
                 logger.info(f"下载器115秒传 [{title}] {clean_line}")
-                # fake115uploader 的 -f 会在单个文件失败后继续遍历其余文件。
-                # 插件语义是“不能秒传就停止”，因此收到首个明确失败日志后终止本次任务。
-                if (
-                    not rapid_failure_seen
-                    and "秒传模式上传" in clean_line
-                    and "出现错误" in clean_line
-                ):
-                    rapid_failure_seen = True
-                    if process.poll() is None:
-                        process.terminate()
-                        logger.warning(
-                            f"下载器115秒传：{title} 存在无法秒传的文件，已停止后续尝试"
-                        )
-            return (
-                process.returncode == 0 and not rapid_failure_seen,
-                "\n".join(output_lines),
-            )
+            return process.returncode == 0, "\n".join(output_lines)
         finally:
             with self._lock:
                 if self._active_process is process:
                     self._active_process = None
 
-    def _build_command(self, path: Path) -> List[str]:
+    def _run_upload_attempt(
+        self, path: Path, title: str, cid: Any = None
+    ) -> Tuple[bool, str, Optional[dict]]:
+        with tempfile.TemporaryDirectory(prefix="mp-115-result-") as result_dir:
+            command = self._build_command(path, Path(result_dir), cid=cid)
+            ok, output = self._run_uploader(command, title)
+            return ok, output, self._read_upload_result(Path(result_dir))
+
+    def _build_command(
+        self, path: Path, result_dir: Path, cid: Any = None
+    ) -> List[str]:
         if not self._runtime_binary_path:
             raise RuntimeError(
                 "找不到可用的 fake115uploader；请安装 Release 版插件，"
@@ -678,14 +710,48 @@ class Downloader115FastUpload(_PluginBase):
             if not self._config_path:
                 command.append("-n")
             command.extend(["-k", self._cookie])
-        if self._cid:
-            command.extend(["-c", self._cid])
+        command.extend(["-r", str(result_dir)])
+        target_cid = self._cid if cid is None else str(cid)
+        if target_cid:
+            command.extend(["-c", target_cid])
         if self._http_retry:
             command.extend(["-http-retry", str(self._http_retry)])
         if path.is_dir():
             command.append("-recursive")
         command.append(str(path))
         return command
+
+    @staticmethod
+    def _read_upload_result(result_dir: Path) -> Optional[dict]:
+        files = sorted(result_dir.glob("* result.json"), key=lambda item: item.stat().st_mtime)
+        if not files:
+            return None
+        try:
+            result = json.loads(files[-1].read_text(encoding="utf-8"))
+            return result if isinstance(result, dict) else None
+        except Exception as err:
+            logger.warning(f"下载器115秒传：读取上传结果失败：{err}")
+            return None
+
+    @staticmethod
+    def _result_failed_files(result: Optional[dict]) -> List[dict]:
+        """提取并去重失败文件。
+
+        >>> Downloader115FastUpload._result_failed_files({"failed": [
+        ...     {"path": "/a.mkv", "cid": 1}, {"path": "/a.mkv", "cid": 1}
+        ... ]})
+        [{'path': '/a.mkv', 'cid': 1}]
+        """
+        failed = result.get("failed") if isinstance(result, dict) else None
+        if not isinstance(failed, list):
+            return []
+        unique = {}
+        for item in failed:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            normalized = {"path": str(item["path"]), "cid": item.get("cid", 0)}
+            unique[(normalized["path"], str(normalized["cid"]))] = normalized
+        return list(unique.values())
 
     def _resolve_binary_path(self) -> str:
         """显式配置优先，其次选择 Release 内置架构，最后尝试容器 PATH。"""
@@ -796,9 +862,14 @@ class Downloader115FastUpload(_PluginBase):
         return progress >= 100 or (progress >= 1 and state not in {"", "unknown"})
 
     def _record_failure(
-        self, key: str, torrent: dict, status: str, message: str
+        self,
+        key: str,
+        torrent: dict,
+        status: str,
+        message: str,
+        failed_files: Optional[List[dict]] = None,
     ):
-        self._tasks[key] = {
+        task = {
             "status": "upload_failed",
             "title": torrent.get("name") or torrent.get("hash"),
             "message": message,
@@ -806,6 +877,12 @@ class Downloader115FastUpload(_PluginBase):
             "retry_count": int(self._tasks.get(key, {}).get("retry_count", 0)) + 1,
             "updated_at": time.time(),
         }
+        if failed_files:
+            task["failed_files"] = failed_files
+            message = f"{len(failed_files)} 个文件待重试：{message}"
+            task["message"] = message
+        # ponytail: 无结果文件时只能重试整个种子；若上游提供原子结果流再细化。
+        self._tasks[key] = task
         self._append_history(torrent, status, message)
         logger.error(
             f"下载器115秒传：{torrent.get('name')} {status}，保留下载任务和文件：{message}"
