@@ -38,8 +38,8 @@ class Downloader115FastUpload(_PluginBase):
     plugin_desc = "监控下载器任务；115 秒传成功后删除种子和文件，失败则保留。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     plugin_version = "1.3.0"
-    plugin_author = "frh-hh"
-    author_url = "https://github.com/frh-hh"
+    plugin_author = "faroxdev"
+    author_url = "https://github.com/faroxdev"
     plugin_config_prefix = "downloader115fastupload_"
     plugin_order = 23
     auth_level = 1

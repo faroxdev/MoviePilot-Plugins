@@ -35,8 +35,8 @@ class EmbyAsyncImages(_PluginBase):
     plugin_desc = "Emby 快速入库后，由 MoviePilot 异步补齐所有缺失元数据。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/emby.png"
     plugin_version = "1.2.0"
-    plugin_author = "frh-hh"
-    author_url = "https://github.com/frh-hh"
+    plugin_author = "faroxdev"
+    author_url = "https://github.com/faroxdev"
     plugin_config_prefix = "embyasyncimages_"
     plugin_order = 22
     auth_level = 1

@@ -6,7 +6,7 @@
     "labels": "Emby,图片,刮削,Webhook",
     "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/emby.png",
-    "author": "frh-hh",
+    "author": "faroxdev",
     "level": 1,
     "history": {
       "v1.0.1": "电影默认立即处理；电视剧配合 Emby 按剧集分组通知，默认仅等待 10 秒确保路径就绪。",
@@ -20,7 +20,7 @@
     "labels": "下载器,qBittorrent,Transmission,115,秒传",
     "version": "1.3.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
-    "author": "frh-hh",
+    "author": "faroxdev",
     "level": 1,
     "history": {
       "v1.3.0": "保存 fake115uploader 的逐文件结果和目标 CID，自动重试时只处理失败文件，避免重复秒传已成功文件。",
