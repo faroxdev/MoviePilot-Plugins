@@ -76,8 +76,15 @@ jobs:
                 continue
               fi
 
+              # 已发布版本保持不变；新版本必须使用新的版本号和 Tag。
+              if gh release view "$tag" >/dev/null 2>&1; then
+                echo "Release $tag already exists, skip."
+                echo "$tag" >> processed_tags.txt
+                continue
+              fi
+
               # Find previous tag for this plugin (any version)
-              prev_tag="$(git tag --list "${plugin_id}_v*" --sort=-version:refname | head -n 1 || true)"
+              prev_tag="$(git tag --list "${plugin_id}_v*" --sort=-version:refname | grep -vxF "$tag" | head -n 1 || true)"
 
               changed=1
               if [ -n "$prev_tag" ]; then
@@ -130,22 +137,40 @@ jobs:
                   -x "*/__pycache__/*" -x "*.pyc"
               ) >/dev/null
 
+              release_assets=("$asset")
+              if [ "$plugin_id" = "Downloader115FastUpload" ]; then
+                # 标准本地仓库包走 MP 原生安装入口，不依赖第三方 ZIP 安装器。
+                local_repo_name="${plugin_id_lc}-localrepo"
+                local_repo_dir="$(mktemp -d)"
+                mkdir -p "$local_repo_dir/$local_repo_name/plugins.v2"
+                cp -a "$package_parent/$package_name" \
+                  "$local_repo_dir/$local_repo_name/plugins.v2/$package_name"
+                jq --arg id "$plugin_id" \
+                  '{($id): (.[$id] | .release = false)}' "$pkg_file" \
+                  > "$local_repo_dir/$local_repo_name/package.v2.json"
+                local_repo_asset="${plugin_id_lc}_v${plugin_version}_localrepo.zip"
+                (
+                  cd "$local_repo_dir"
+                  zip -r "$GITHUB_WORKSPACE/$local_repo_asset" "$local_repo_name" \
+                    -x "*/__pycache__/*" -x "*.pyc"
+                ) >/dev/null
+                release_assets+=("$local_repo_asset")
+                rm -rf "$local_repo_dir"
+              fi
+
               if [ -n "$staging_dir" ]; then
                 rm -rf "$staging_dir" "$source_dir"
               fi
 
-              # If same tag exists, delete release and both remote/local tag first
-              if gh release view "$tag" >/dev/null 2>&1; then
-                echo "Release $tag exists, deleting..."
-                gh release delete "$tag" -y
-                git push origin :refs/tags/"$tag" || true
-              fi
-
-              # Ensure no stale local tag remains
-              git tag -d "$tag" >/dev/null 2>&1 || true
-
               echo "Creating release $tag"
-              gh release create "$tag" "$asset" --title "$tag" --notes "Automated release of $plugin_id $plugin_version" --latest --target "$GITHUB_SHA"
+              jq -r --arg id "$plugin_id" --arg version "v$plugin_version" \
+                '.[$id].history[$version] // "Plugin release"' "$pkg_file" > release_notes.txt
+              if [ "$plugin_id" = "Downloader115FastUpload" ]; then
+                echo >> release_notes.txt
+                cat "$plugin_dir/README.md" >> release_notes.txt
+              fi
+              gh release create "$tag" "${release_assets[@]}" --title "$tag" \
+                --notes-file release_notes.txt --latest --target "$GITHUB_SHA"
 
               echo "$tag" >> processed_tags.txt
             done

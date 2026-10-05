@@ -76,6 +76,10 @@ http://MoviePilot地址:3001/api/v1/webhook/?token=MP_API_TOKEN&source=MP中的E
 
 ### 部署前准备
 
+MP V3 本地安装请优先使用原生本地仓库功能，Release 提供包含二进制的
+`*_localrepo.zip`。无需公开仓库或执行 Docker 修复脚本，具体步骤见
+[安装说明](plugins.v2/downloader115fastupload/README.md)。
+
 插件 Release 已内置从固定上游提交构建的 Linux amd64 和 arm64 版本
 `fake115uploader`。插件会根据 MoviePilot 容器架构自动选择并补充执行权限，不需要在
 容器中安装 Go，也通常不需要填写“fake115uploader 路径”。
