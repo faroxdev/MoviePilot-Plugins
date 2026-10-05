@@ -9,8 +9,8 @@ MoviePilot 插件：监控下载器任务，使用 fake115uploader 的 `-f` 模�
 
 `https://github.com/faroxdev/MoviePilot-Plugins`
 
-从插件市场安装“下载器115秒传”。MP V2 使用 `package.v2.json`；MP V3 可通过
-官方兼容规则读取同一实现。Release ZIP 内置 Linux amd64/arm64 秒传程序，通常
+从插件市场安装“下载器115秒传”。MP V2 使用 `1.3.1`；MP V3（`>=3.0.10`）
+使用 SDK 专用实现 `2.0.0`，不会回退安装 V2 版本。Release ZIP 内置 Linux amd64/arm64 秒传程序，通常
 无需填写程序路径，也无需在容器中安装 Go。
 
 需要本地 ZIP 安装时，下载 Release 中的 `downloader115fastupload_v版本.zip`，
@@ -31,10 +31,12 @@ MoviePilot 插件：监控下载器任务，使用 fake115uploader 的 `-f` 模�
 
 ## 发布与许可
 
-插件源码位于 `plugins.v2/downloader115fastupload/`。修改版本时，同步更新插件的
-`plugin_version` 和 `package.v2.json` 中的版本及更新日志，推送后自动创建 Release。
+V2 源码位于 `plugins.v2/downloader115fastupload/`，V3 源码位于
+`plugins.v3/downloader115fastupload/`。修改版本时，同步更新插件的
+`plugin_version` 和对应 `package.v2.json` / `package.v3.json` 的版本及更新日志，
+推送后自动创建 Release。
 已发布版本不会被自动覆盖。
 
 构建使用固定上游提交，包含 Linux amd64/arm64 二进制、上游 GPLv3 许可证和对应源码。
-详细信息见 [构建说明](plugins.v2/downloader115fastupload/FAKE115UPLOADER.md)。
+详细信息见 [构建说明](plugins.v3/downloader115fastupload/FAKE115UPLOADER.md)。
 仓库采用 [GPLv3](LICENSE)。

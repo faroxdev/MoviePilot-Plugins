@@ -4,17 +4,18 @@
     "release": true,
     "description": "监控 MoviePilot 下载器任务，使用 fake115uploader 尝试 115 秒传；成功后删除种子和文件，失败则保留。",
     "labels": "下载器,qBittorrent,Transmission,115,秒传",
-    "version": "1.3.1",
+    "version": "2.0.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "faroxdev",
     "level": 1,
     "history": {
+      "v2.0.0": "MP V3 专用版：迁移至稳定 SDK，扫描 API 声明统一响应模型；保留原有秒传、重试和删除规则。",
       "v1.3.1": "新增内置秒传程序的标准本地仓库安装包，通过 MP 原生插件安装流程管理加载与备份；补充 V3 安装说明。",
       "v1.3.0": "保存 fake115uploader 的逐文件结果和目标 CID，自动重试时只处理失败文件，避免重复秒传已成功文件。",
       "v1.2.0": "为秒传失败任务增加独立的定时重试计时器，默认每小时重试一次。",
       "v1.1.0": "Release 内置 Linux amd64/arm64 fake115uploader，插件自动选择架构并设置执行权限，也可用外部路径覆盖。",
       "v1.0.0": "首个版本：通过 MP 统一接口监控下载器新完成任务，仅尝试 115 秒传，成功后删除种子和数据，失败保留并集成 MP 日志、通知与历史记录。"
     },
-    "v3": false
+    "system_version": ">=3.0.10"
   }
 }
