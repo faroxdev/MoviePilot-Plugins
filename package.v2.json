@@ -1,18 +1,4 @@
 {
-  "EmbyAsyncImages": {
-    "name": "Emby异步图片刮削",
-    "release": true,
-    "description": "Emby 快速入库后，由 MoviePilot 异步补齐缺失图片；不创建或修改 NFO。",
-    "labels": "Emby,图片,刮削,Webhook",
-    "version": "1.0.1",
-    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/emby.png",
-    "author": "faroxdev",
-    "level": 1,
-    "history": {
-      "v1.0.1": "电影默认立即处理；电视剧配合 Emby 按剧集分组通知，默认仅等待 10 秒确保路径就绪。",
-      "v1.0.0": "首个版本：监听 Emby library.new，延迟合并任务，只补缺失图片，保留 NFO 和已有图片，完成后刷新 Emby 项目。"
-    }
-  },
   "Downloader115FastUpload": {
     "name": "下载器115秒传",
     "release": true,
